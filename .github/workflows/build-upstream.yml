@@ -1,4 +1,4 @@
-name: Build Signed Release APK
+name: Build Release APK (auto-sign)
 
 on:
   workflow_dispatch:
@@ -9,10 +9,9 @@ jobs:
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       ANDROID_HOME: ${{ github.workspace }}/android-sdk
-      KEYSTORE_PATH: ${{ github.workspace }}/app/my-release-key.jks
 
     steps:
-      - name: Checkout upstream repository
+      - name: Checkout upstream repo
         uses: actions/checkout@v4
         with:
           repository: MuntashirAkon/AppManager
@@ -27,7 +26,7 @@ jobs:
           java-version: '17'
 
       - name: Install prerequisites
-        run: sudo apt-get update && sudo apt-get install -y unzip wget
+        run: sudo apt-get update && sudo apt-get install -y unzip wget coreutils dash zip
 
       - name: Install Android commandline tools
         run: |
@@ -40,28 +39,47 @@ jobs:
       - name: Install Android SDK packages and accept licenses
         env:
           PATH: ${{ env.ANDROID_HOME }}/cmdline-tools/latest/bin:${{ env.PATH }}
+        shell: bash
         run: |
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "platform-tools" "platforms;android-33" "build-tools;33.0.2"
-          # kabul et lisansları
-          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME --licenses
-
-      - name: Decode keystore from secret
-        run: |
-          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > $KEYSTORE_PATH
-          ls -l $KEYSTORE_PATH
+          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          printf 'y\n' | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME --licenses
 
       - name: Verify java & gradle wrapper
         run: java -version && ./gradlew -v
 
-      - name: Build signed release APK
-        env:
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+      - name: Build release (unsigned)
         run: ./gradlew clean assembleRelease --no-daemon
 
-      - name: Upload release APK
+      - name: Create temporary keystore and sign release APK
+        shell: bash
+        run: |
+          # 1) Find an unsigned release APK produced by the build
+          set -e
+          unsigned_apk=$(find app/build/outputs -type f -name "*release*.apk" ! -name "*aligned*" ! -name "*signed*" | head -n1)
+          if [ -z "$unsigned_apk" ]; then
+            echo "Unsigned release APK not found. Listing outputs:"
+            find app/build/outputs -maxdepth 4 -type f -print
+            exit 2
+          fi
+          echo "Found unsigned apk: $unsigned_apk"
+          # 2) Generate a temporary keystore (ephemeral)
+          KS_PASS=temp1234
+          KEY_ALIAS=tempkey
+          keytool -genkeypair -v -keystore temp.jks -storepass $KS_PASS -keypass $KS_PASS -alias $KEY_ALIAS -dname "CN=Temp" -keyalg RSA -keysize 2048 -validity 10000
+          # 3) Pick newest build-tools apksigner
+          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n1)
+          echo "Using build-tools: $BUILD_TOOLS"
+          # 4) Copy unsigned to a signing target and sign in-place
+          cp "$unsigned_apk" unsigned-to-sign.apk
+          $BUILD_TOOLS/apksigner sign --ks temp.jks --ks-pass pass:$KS_PASS --key-pass pass:$KS_PASS unsigned-to-sign.apk
+          # 5) Verify
+          $BUILD_TOOLS/apksigner verify --print-certs unsigned-to-sign.apk || true
+          # 6) Move to final file
+          mv unsigned-to-sign.apk app-release-signed.apk
+          ls -lh app-release-signed.apk
+
+      - name: Upload signed APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-apk
-          path: app/build/outputs/**/*.apk
+          name: app-release-signed
+          path: app-release-signed.apk
