@@ -1,4 +1,4 @@
-name: Build Release APK (auto-sign)
+name: Build Latest Upstream APK (signed release)
 
 on:
   workflow_dispatch:
@@ -26,56 +26,77 @@ jobs:
           java-version: '17'
 
       - name: Install prerequisites
-        run: sudo apt-get update && sudo apt-get install -y unzip wget coreutils dash zip
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip wget coreutils bash zip dos2unix
 
       - name: Install Android commandline tools
         run: |
           mkdir -p $ANDROID_HOME/cmdline-tools
           cd $HOME
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline.zip
-          unzip -q cmdline.zip -d $ANDROID_HOME/cmdline-tools
-          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+          unzip -o -q cmdline.zip -d $ANDROID_HOME/cmdline-tools
+
+          if [ -d "$ANDROID_HOME/cmdline-tools/cmdline-tools" ]; then
+            mv -f "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          fi
 
       - name: Install Android SDK packages and accept licenses
         env:
           PATH: ${{ env.ANDROID_HOME }}/cmdline-tools/latest/bin:${{ env.PATH }}
         shell: bash
         run: |
-          $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "platform-tools" "platforms;android-33" "build-tools;33.0.2"
-          printf 'y\n' | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME --licenses
+          bash "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          printf 'y\n' | bash "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses
 
-      - name: Verify java & gradle wrapper
-        run: java -version && ./gradlew -v
+      - name: Verify Java and Gradle
+        run: |
+          java -version
+          ./gradlew -v
 
-      - name: Build release (unsigned)
+      - name: Build release APK
         run: ./gradlew clean assembleRelease --no-daemon
 
-      - name: Create temporary keystore and sign release APK
+      - name: Sign release APK using temporary keystore
         shell: bash
         run: |
-          # 1) Find an unsigned release APK produced by the build
           set -e
-          unsigned_apk=$(find app/build/outputs -type f -name "*release*.apk" ! -name "*aligned*" ! -name "*signed*" | head -n1)
+          unsigned_apk=$(find app/build/outputs -type f -name "*.apk" | head -n 1)
           if [ -z "$unsigned_apk" ]; then
-            echo "Unsigned release APK not found. Listing outputs:"
-            find app/build/outputs -maxdepth 4 -type f -print
-            exit 2
+            echo "No APK found in app/build/outputs/"
+            find app/build/outputs -maxdepth 6 -type f | head -n 50
+            exit 1
           fi
-          echo "Found unsigned apk: $unsigned_apk"
-          # 2) Generate a temporary keystore (ephemeral)
-          KS_PASS=temp1234
-          KEY_ALIAS=tempkey
-          keytool -genkeypair -v -keystore temp.jks -storepass $KS_PASS -keypass $KS_PASS -alias $KEY_ALIAS -dname "CN=Temp" -keyalg RSA -keysize 2048 -validity 10000
-          # 3) Pick newest build-tools apksigner
-          BUILD_TOOLS=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n1)
+
+          echo "Found APK: $unsigned_apk"
+
+          KS_PASS="temp1234"
+          KEY_ALIAS="tempkey"
+
+          keytool -genkeypair \
+            -v \
+            -keystore temp.jks \
+            -storepass "$KS_PASS" \
+            -keypass "$KS_PASS" \
+            -alias "$KEY_ALIAS" \
+            -dname "CN=Temp User, OU=Temp, O=Temp, L=Temp, S=Temp, C=TR" \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000
+
+          BUILD_TOOLS=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -n 1)
           echo "Using build-tools: $BUILD_TOOLS"
-          # 4) Copy unsigned to a signing target and sign in-place
-          cp "$unsigned_apk" unsigned-to-sign.apk
-          $BUILD_TOOLS/apksigner sign --ks temp.jks --ks-pass pass:$KS_PASS --key-pass pass:$KS_PASS unsigned-to-sign.apk
-          # 5) Verify
-          $BUILD_TOOLS/apksigner verify --print-certs unsigned-to-sign.apk || true
-          # 6) Move to final file
-          mv unsigned-to-sign.apk app-release-signed.apk
+
+          cp "$unsigned_apk" app-release-signed.apk
+          "$BUILD_TOOLS"/apksigner sign \
+            --ks temp.jks \
+            --ks-pass pass:"$KS_PASS" \
+            --key-pass pass:"$KS_PASS" \
+            --out app-release-signed.apk \
+            app-release-signed.apk
+
+          "$BUILD_TOOLS"/apksigner verify --print-certs app-release-signed.apk
+
           ls -lh app-release-signed.apk
 
       - name: Upload signed APK artifact
