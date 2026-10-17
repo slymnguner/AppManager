@@ -1,4 +1,4 @@
-name: Build Latest Upstream APK
+name: Build Signed Release APK
 
 on:
   workflow_dispatch:
@@ -8,9 +8,11 @@ jobs:
     runs-on: ubuntu-latest
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
+      ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      KEYSTORE_PATH: ${{ github.workspace }}/app/my-release-key.jks
 
     steps:
-      - name: Checkout upstream repo
+      - name: Checkout upstream repository
         uses: actions/checkout@v4
         with:
           repository: MuntashirAkon/AppManager
@@ -24,20 +26,42 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK
+      - name: Install prerequisites
+        run: sudo apt-get update && sudo apt-get install -y unzip wget
+
+      - name: Install Android commandline tools
         run: |
-          mkdir -p $ANDROID_SDK_ROOT/cmdline-tools
+          mkdir -p $ANDROID_HOME/cmdline-tools
           cd $HOME
           wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline.zip
-          unzip -q cmdline.zip -d $ANDROID_SDK_ROOT/cmdline-tools
-          mv $ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools $ANDROID_SDK_ROOT/cmdline-tools/latest
-          yes | $ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_SDK_ROOT "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          unzip -q cmdline.zip -d $ANDROID_HOME/cmdline-tools
+          mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
 
-      - name: Build APK
-        run: ./gradlew clean assembleRelease
+      - name: Install Android SDK packages and accept licenses
+        env:
+          PATH: ${{ env.ANDROID_HOME }}/cmdline-tools/latest/bin:${{ env.PATH }}
+        run: |
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME "platform-tools" "platforms;android-33" "build-tools;33.0.2"
+          # kabul et lisansları
+          yes | $ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager --sdk_root=$ANDROID_HOME --licenses
 
-      - name: Upload APK artifact
+      - name: Decode keystore from secret
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > $KEYSTORE_PATH
+          ls -l $KEYSTORE_PATH
+
+      - name: Verify java & gradle wrapper
+        run: java -version && ./gradlew -v
+
+      - name: Build signed release APK
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: ./gradlew clean assembleRelease --no-daemon
+
+      - name: Upload release APK
         uses: actions/upload-artifact@v4
         with:
-          name: latest-upstream-apk
+          name: release-apk
           path: app/build/outputs/**/*.apk
