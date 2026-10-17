@@ -9,6 +9,7 @@ jobs:
     env:
       ANDROID_SDK_ROOT: ${{ github.workspace }}/android-sdk
       ANDROID_HOME: ${{ github.workspace }}/android-sdk
+      KEYSTORE_PATH: ${{ github.workspace }}/temp.jks
 
     steps:
       - name: Checkout upstream repo
@@ -25,11 +26,30 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Install Android SDK (action)
-        uses: android-actions/setup-android@v2
-        with:
-          api-level: 33
-          components: platform-tools,platforms;android-33,build-tools;33.0.2
+      - name: Install Android SDK manually
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$ANDROID_HOME/cmdline-tools"
+          cd "$HOME"
+          wget -q https://dl.google.com/android/repository/commandlinetools-linux-9477386_latest.zip -O cmdline.zip
+          unzip -q cmdline.zip -d "$ANDROID_HOME/cmdline-tools"
+
+          if [ -d "$ANDROID_HOME/cmdline-tools/cmdline-tools" ]; then
+            mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest"
+          fi
+
+          ls -R "$ANDROID_HOME/cmdline-tools"
+
+      - name: Accept Android SDK licenses and install packages
+        shell: bash
+        run: |
+          set -e
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" --licenses
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --sdk_root="$ANDROID_HOME" \
+            "platform-tools" \
+            "platforms;android-33" \
+            "build-tools;33.0.2"
 
       - name: Verify Java and Gradle
         run: |
@@ -50,14 +70,12 @@ jobs:
             exit 1
           fi
 
-          echo "Found APK: $unsigned_apk"
-
           KS_PASS="temp1234"
           KEY_ALIAS="tempkey"
 
           keytool -genkeypair \
             -v \
-            -keystore temp.jks \
+            -keystore "$KEYSTORE_PATH" \
             -storepass "$KS_PASS" \
             -keypass "$KS_PASS" \
             -alias "$KEY_ALIAS" \
@@ -71,7 +89,7 @@ jobs:
 
           cp "$unsigned_apk" app-release-signed.apk
           "$BUILD_TOOLS"/apksigner sign \
-            --ks temp.jks \
+            --ks "$KEYSTORE_PATH" \
             --ks-pass pass:"$KS_PASS" \
             --key-pass pass:"$KS_PASS" \
             --out app-release-signed.apk \
